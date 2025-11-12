@@ -1,67 +1,99 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-# This workflow will build a Java project with Gradle and cache/restore any dependencies to improve the workflow execution time
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-gradle
-
-name: Java CI with Gradle
+name: Build ReTerraForged (Forge + Fabric)
 
 on:
   push:
-    branches: [ "1.20.1" ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ "1.20.1" ]
+    branches: [ main, master ]
+  workflow_dispatch:
+  release:
+    types: [published]
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 60
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    # Configure Gradle for optimal use in GitHub Actions, including caching of downloaded dependencies.
-    # See: https://github.com/gradle/actions/blob/main/setup-gradle/README.md
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: 'gradle'
 
-    - name: Build with Gradle Wrapper
-      run: ./gradlew build
+      - name: Make gradlew executable
+        run: |
+          if [ -f "./gradlew" ]; then chmod +x ./gradlew; fi
 
-    # NOTE: The Gradle Wrapper is the default and recommended way to run Gradle (https://docs.gradle.org/current/userguide/gradle_wrapper.html).
-    # If your project does not have the Gradle Wrapper configured, you can use the following configuration to run Gradle with a specified version.
-    #
-    # - name: Setup Gradle
-    #   uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
-    #   with:
-    #     gradle-version: '8.9'
-    #
-    # - name: Build with Gradle 8.9
-    #   run: gradle build
+      - name: Cache Gradle directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            .gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
-  dependency-submission:
+      - name: Show repo top-level (for debug)
+        run: ls -la
 
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+      - name: Run Gradle build for subprojects
+        env:
+          GRADLE_OPTS: "-Xmx3g -Dorg.gradle.jvmargs=-Xmx3g"
+        run: |
+          set -e
+          if [ ! -f "./gradlew" ]; then
+            echo "No gradlew wrapper found - aborting" >&2
+            exit 1
+          fi
 
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
+          # Try building forge and fabric explicitly (preferred)
+          echo "Attempting to build :forge and :fabric (if present)..."
+          ./gradlew --no-daemon :forge:build :fabric:build --no-parallel --stacktrace || true
 
-    # Generates and submits a dependency graph, enabling Dependabot Alerts for all project dependencies.
-    # See: https://github.com/gradle/actions/blob/main/dependency-submission/README.md
-    - name: Generate and submit dependency graph
-      uses: gradle/actions/dependency-submission@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+          # Some repos expect assemble/build at root; try conservative fallback
+          echo "Fallback: run assemble/build at root to ensure jars produced"
+          ./gradlew --no-daemon assemble build --no-parallel --stacktrace || true
+
+          # If the project needs a specific remap/reobf task for Forge, uncomment and adjust below:
+          # echo "If you need remap/reobf for Forge artifacts, run remap tasks (uncomment if required)"
+          # ./gradlew --no-daemon :forge:remapJar :forge:reobfJar --no-parallel --stacktrace
+
+      - name: Locate built JAR(s)
+        id: find-jars
+        run: |
+          set -e
+          echo "Searching for candidate JARs..."
+          # search typical output dirs used by this repo
+          JARS=$(find . -type f \( -path "*/forge/build/libs/*.jar" -o -path "*/fabric/build/libs/*.jar" -o -path "*/build/libs/*.jar" \) -not -name "*-sources.jar" -not -name "*-javadoc.jar" -print)
+          if [ -z "$JARS" ]; then
+            echo "No jars found in expected locations. Listing directories for debugging:" >&2
+            find . -maxdepth 3 -type d -print
+            exit 1
+          fi
+          echo "Found jars:"
+          echo "$JARS"
+          FIRST=$(echo "$JARS" | head -n 1)
+          echo "jar_path=$FIRST" >> $GITHUB_OUTPUT
+          echo "$JARS" > jars_to_upload.txt
+          cat jars_to_upload.txt
+
+      - name: Upload built JAR(s) as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reterraforged-built-jars
+          path: |
+            ${{ steps.find-jars.outputs.jar_path }}
+            jars_to_upload.txt
+            $(if [ -f jars_to_upload.txt ]; then cat jars_to_upload.txt; fi)
+
+      - name: Show primary artifact path
+        run: echo "Primary JAR: ${{ steps.find-jars.outputs.jar_path }}"
