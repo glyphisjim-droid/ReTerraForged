@@ -40,6 +40,9 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
+      - name: Create fake Fabric assets directory (Architectury fix)
+        run: |
+          mkdir -p ~/.gradle/caches/fabric-loom/assets
 
       # ▶️ Run forge:runData if Forge exists
       - name: Run forge:runData (if available)
